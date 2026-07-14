@@ -1,0 +1,28 @@
+{
+  "name": "my-webcodec_1ton_mediasoup",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "server": "tsx src/server.ts",
+    "client": "vite --host 127.0.0.1",
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "npm run build"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "mediasoup-client": "^3.19.9",
+    "vite": "^7.3.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.6.2",
+    "@types/ws": "^8.18.1",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebCodecs mediasoup 1:N</title>
+    <script type="module" crossorigin src="/assets/index-B2zeDL5r.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DMhFLXNX.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <h1>WebCodecs mediasoup 1:N</h1>
+          <p>첫 접속자는 producer가 되고, 이후 접속자는 같은 WebCodecs stream을 consume합니다.</p>
+        </div>
+        <button id="startButton" type="button">Start</button>
+      </section>
+
+      <section class="videoGrid">
+        <figure>
+          <video id="localVideo" muted playsinline autoplay></video>
+          <figcaption id="localCaption">Producer preview</figcaption>
+        </figure>
+        <figure>
+          <video id="remoteVideo" playsinline autoplay></video>
+          <figcaption id="remoteCaption">Consumer playback</figcaption>
+        </figure>
+      </section>
+
+      <section class="stats">
+        <div><span>Socket</span><strong id="socketState">idle</strong></div>
+        <div><span>Role</span><strong id="roleState">idle</strong></div>
+        <div><span>Peer ID</span><strong id="peerId">-</strong></div>
+        <div><span>Connected consumers</span><strong id="consumerCount">0</strong></div>
+        <div><span>Encoded chunks</span><strong id="chunkCount">0</strong></div>
+        <div><span>Injected RTP packets</span><strong id="packetCount">0</strong></div>
+        <div><span>Consumer</span><strong id="consumerState">idle</strong></div>
+        <div><span>RTP received</span><strong id="rtpReceived">0</strong></div>
+        <div><span>Frames decoded</span><strong id="framesDecoded">0</strong></div>
+      </section>
+
+      <pre id="log"></pre>
+    </main>
+  </body>
+</html>
