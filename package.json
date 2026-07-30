@@ -5,10 +5,10 @@
   "type": "module",
   "scripts": {
     "server": "tsx src/server.ts",
-    "client": "vite --host 127.0.0.1",
+    "client": "vite --host 0.0.0.0",
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --host 127.0.0.1",
+    "preview": "vite preview --host 0.0.0.0",
     "test": "npm run build"
   },
   "dependencies": {
@@ -21,6 +21,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "^25.6.2",
     "@types/ws": "^8.18.1",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
     "concurrently": "^9.2.1",
     "tsx": "^4.21.0",
     "typescript": "^6.0.3"

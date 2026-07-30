@@ -32,6 +32,35 @@ button:disabled {
   cursor: progress;
 }
 
+.button-group {
+  display: flex;
+  gap: 10px;
+}
+
+button.secondary {
+  background: #2e7d32;
+}
+
+button.secondary:hover {
+  background: #1b5e20;
+}
+
+.visualizer-btn {
+  align-items: center;
+  background: #6b21a8;
+  border-radius: 6px;
+  color: white;
+  display: inline-flex;
+  font-weight: 700;
+  min-height: 44px;
+  padding: 0 18px;
+  text-decoration: none;
+}
+
+.visualizer-btn:hover {
+  background: #581c87;
+}
+
 .shell {
   margin: 0 auto;
   max-width: 1180px;

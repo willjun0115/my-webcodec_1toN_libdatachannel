@@ -1,0 +1,922 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebRTC & WebCodecs Dump Visualizer</title>
+  <!-- Google Fonts: Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg-color: #0b0f19;
+      --card-bg: #151c2c;
+      --card-border: #232d42;
+      --accent-blue: #3b82f6;
+      --accent-cyan: #06b6d4;
+      --accent-green: #10b981;
+      --accent-purple: #8b5cf6;
+      --accent-red: #ef4444;
+      --accent-amber: #f59e0b;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      min-height: 100vh;
+      padding: 24px;
+      line-height: 1.5;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--card-border);
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .title-area h1 {
+      font-size: 1.8rem;
+      font-weight: 800;
+      background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .title-area p {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      margin-top: 4px;
+    }
+
+    /* Drop Zone */
+    .drop-zone {
+      border: 2px dashed var(--accent-blue);
+      background: rgba(59, 130, 246, 0.05);
+      border-radius: 16px;
+      padding: 40px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.25s ease;
+    }
+
+    .drop-zone:hover, .drop-zone.dragover {
+      background: rgba(59, 130, 246, 0.12);
+      border-color: var(--accent-cyan);
+      transform: translateY(-2px);
+    }
+
+    .drop-zone svg {
+      width: 48px;
+      height: 48px;
+      fill: none;
+      stroke: var(--accent-blue);
+      stroke-width: 2;
+      margin-bottom: 12px;
+    }
+
+    .drop-zone p {
+      font-size: 1.1rem;
+      font-weight: 600;
+    }
+
+    .drop-zone span {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      display: block;
+      margin-top: 6px;
+    }
+
+    input[type="file"] {
+      display: none;
+    }
+
+    /* Metadata Bar */
+    .meta-bar {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      padding: 18px 20px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+    }
+
+    .kpi-card {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .kpi-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 4px;
+      height: 100%;
+      background: var(--accent-blue);
+    }
+
+    .kpi-card.cyan::before { background: var(--accent-cyan); }
+    .kpi-card.green::before { background: var(--accent-green); }
+    .kpi-card.purple::before { background: var(--accent-purple); }
+    .kpi-card.amber::before { background: var(--accent-amber); }
+    .kpi-card.red::before { background: var(--accent-red); }
+
+    .kpi-title {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .kpi-value {
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: var(--text-main);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .kpi-sub {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    /* Badge */
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .badge-producer {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    .badge-consumer {
+      background: rgba(139, 92, 246, 0.15);
+      color: #a78bfa;
+      border: 1px solid rgba(139, 92, 246, 0.3);
+    }
+
+    /* Chart Grid */
+    .chart-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 20px;
+    }
+
+    @media (max-width: 1024px) {
+      .chart-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .chart-card {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .chart-header h3 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+
+    .chart-container {
+      position: relative;
+      width: 100%;
+      height: 280px;
+    }
+
+    /* Event Log Feed */
+    .events-card {
+      margin-top: 8px;
+    }
+
+    .events-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .search-box {
+      background: var(--bg-color);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 8px 14px;
+      color: var(--text-main);
+      font-size: 0.85rem;
+      outline: none;
+      width: 240px;
+    }
+
+    .events-table-wrapper {
+      max-height: 320px;
+      overflow-y: auto;
+      border-radius: 8px;
+      border: 1px solid var(--card-border);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      text-align: left;
+    }
+
+    th {
+      background: #1e293b;
+      color: var(--text-muted);
+      padding: 10px 14px;
+      font-weight: 600;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    td {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--card-border);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    tr:hover td {
+      background: rgba(255,255,255,0.03);
+    }
+
+    .event-tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      background: rgba(59, 130, 246, 0.15);
+      color: #60a5fa;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header>
+      <div class="title-area">
+        <h1>📊 WebRTC & WebCodecs Dump Visualizer</h1>
+        <p>WebCodecs + WebSocket & WebRTC 덤프 JSON 파일 실시간 시각화 대시보드</p>
+      </div>
+      <div id="fileInfoArea" class="hidden">
+        <button class="badge badge-producer" id="roleBadge">PRODUCER</button>
+        <span style="font-size: 0.85rem; color: var(--text-muted); margin-left: 8px;" id="peerIdText">Peer: -</span>
+      </div>
+    </header>
+
+    <!-- File Drop Zone -->
+    <div class="drop-zone" id="dropZone">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+        <path d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <p>webrtc-dump-*.json 파일을 이곳에 드래그하거나 클릭하여 선택하세요</p>
+      <span>송신자(Producer) 및 수신자(Consumer) 덤프 분석 지원</span>
+      <input type="file" id="fileInput" accept=".json">
+    </div>
+
+    <!-- Dashboard Content (Initially Hidden) -->
+    <div id="dashboardContent" class="hidden" style="display: flex; flex-direction: column; gap: 24px;">
+
+      <!-- KPI Summary Cards -->
+      <section class="meta-bar">
+        <div class="card kpi-card cyan">
+          <div class="kpi-title">Average Bitrate</div>
+          <div class="kpi-value" id="kpiAvgBitrate">- Kbps</div>
+          <div class="kpi-sub" id="kpiMaxBitrate">Peak: - Kbps</div>
+        </div>
+
+        <div class="card kpi-card green">
+          <div class="kpi-title">Average FPS</div>
+          <div class="kpi-value" id="kpiAvgFps">- FPS</div>
+          <div class="kpi-sub" id="kpiTotalFrames">Total: - frames</div>
+        </div>
+
+        <div class="card kpi-card purple">
+          <div class="kpi-title" id="kpiTitle3">KeyFrame / Delta Ratio</div>
+          <div class="kpi-value" id="kpiFrameRatio">-</div>
+          <div class="kpi-sub" id="kpiKeyCount">KeyFrames: -</div>
+        </div>
+
+        <div class="card kpi-card amber">
+          <div class="kpi-title" id="kpiTitle4">Max Encoder Queue</div>
+          <div class="kpi-value" id="kpiMaxQueue">-</div>
+          <div class="kpi-sub" id="kpiQueueStatus">Queue Status: Normal</div>
+        </div>
+
+        <div class="card kpi-card red">
+          <div class="kpi-title" id="kpiTitle5">Max Socket Buffer</div>
+          <div class="kpi-value" id="kpiMaxSocket">- B</div>
+          <div class="kpi-sub" id="kpiDuration">Duration: -s</div>
+        </div>
+      </section>
+
+      <!-- Charts Grid -->
+      <section class="chart-grid">
+        <!-- Chart 1: Bitrate -->
+        <div class="card chart-card">
+          <div class="chart-header">
+            <h3 id="chartTitle1">📈 Bitrate Over Time (Kbps)</h3>
+          </div>
+          <div class="chart-container">
+            <canvas id="bitrateChart"></canvas>
+          </div>
+        </div>
+
+        <!-- Chart 2: FPS & Frame Types -->
+        <div class="card chart-card">
+          <div class="chart-header">
+            <h3 id="chartTitle2">🎯 Frame Rate (FPS)</h3>
+          </div>
+          <div class="chart-container">
+            <canvas id="fpsChart"></canvas>
+          </div>
+        </div>
+
+        <!-- Chart 3: Queue & Backpressure -->
+        <div class="card chart-card">
+          <div class="chart-header">
+            <h3 id="chartTitle3">⌛ Encoder Queue & Socket Backpressure</h3>
+          </div>
+          <div class="chart-container">
+            <canvas id="queueChart"></canvas>
+          </div>
+        </div>
+
+        <!-- Chart 4: Cumulative Transfer -->
+        <div class="card chart-card">
+          <div class="chart-header">
+            <h3 id="chartTitle4">📦 Cumulative Data & Memory</h3>
+          </div>
+          <div class="chart-container">
+            <canvas id="cumulativeChart"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <!-- Server Events Timeline -->
+      <section class="card events-card">
+        <div class="events-header">
+          <h3>📡 Server Push Events Timeline</h3>
+          <input type="text" id="eventSearch" class="search-box" placeholder="이벤트 검색 (예: roomState)">
+        </div>
+        <div class="events-table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 20%;">Time</th>
+                <th style="width: 25%;">Event</th>
+                <th style="width: 55%;">Payload Data</th>
+              </tr>
+            </thead>
+            <tbody id="eventsTableBody">
+              <!-- Rows will be injected dynamically -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <script>
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+    const dashboardContent = document.getElementById('dashboardContent');
+    const fileInfoArea = document.getElementById('fileInfoArea');
+    const roleBadge = document.getElementById('roleBadge');
+    const peerIdText = document.getElementById('peerIdText');
+
+    let bitrateChartInstance = null;
+    let fpsChartInstance = null;
+    let queueChartInstance = null;
+    let cumulativeChartInstance = null;
+    let currentServerEvents = [];
+
+    // Drop zone drag events
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+      if (e.dataTransfer.files.length > 0) {
+        handleFile(e.dataTransfer.files[0]);
+      }
+    });
+
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files.length > 0) {
+        handleFile(e.target.files[0]);
+      }
+    });
+
+    function handleFile(file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const data = JSON.parse(e.target.result);
+          renderDashboard(data);
+        } catch (err) {
+          alert('JSON 파일 형식이 올바르지 않습니다: ' + err.message);
+        }
+      };
+      reader.readAsText(file);
+    }
+
+    function renderDashboard(dump) {
+      const metadata = dump.metadata || {};
+      const role = metadata.role || 'producer';
+      const peerId = metadata.peerId || 'unknown';
+
+      // Header update
+      roleBadge.textContent = role.toUpperCase();
+      roleBadge.className = `badge ${role === 'producer' ? 'badge-producer' : 'badge-consumer'}`;
+      peerIdText.textContent = `Peer: ${peerId}`;
+      fileInfoArea.classList.remove('hidden');
+
+      const producerStats = dump.producerStats || [];
+      const consumerStats = dump.consumerStats || [];
+      currentServerEvents = dump.serverEvents || [];
+
+      if (role === 'producer' && producerStats.length > 0) {
+        renderProducerDashboard(producerStats, metadata);
+      } else if (role === 'consumer' && consumerStats.length > 0) {
+        renderConsumerDashboard(consumerStats, metadata);
+      } else {
+        alert('덤프 파일에 통계 샘플(producerStats/consumerStats) 데이터가 없습니다.');
+        return;
+      }
+
+      renderServerEventsTable(currentServerEvents);
+      dashboardContent.classList.remove('hidden');
+    }
+
+    function renderProducerDashboard(stats, metadata) {
+      const labels = stats.map((s, idx) => {
+        const date = new Date(s.timestamp || s.timeIso);
+        return date.toLocaleTimeString();
+      });
+
+      // KPI Calculations
+      const bitrates = stats.map(s => s.bitrateKbps || 0);
+      const fpsList = stats.map(s => s.fps || 0);
+      const keyFramesList = stats.map(s => s.keyFrames || 0);
+      const deltaFramesList = stats.map(s => s.deltaFrames || 0);
+      const queues = stats.map(s => s.encodeQueueSize || 0);
+      const socketBuffers = stats.map(s => s.socketBufferedAmount || 0);
+      const totalBytes = stats.map(s => s.totalBytesSent || 0);
+      const totalChunks = stats.map(s => s.totalEncodedChunks || 0);
+
+      const avgBitrate = Math.round(bitrates.reduce((a, b) => a + b, 0) / bitrates.length);
+      const peakBitrate = Math.max(...bitrates, 0);
+      const avgFps = Math.round(fpsList.reduce((a, b) => a + b, 0) / fpsList.length);
+      const totalKey = keyFramesList.reduce((a, b) => a + b, 0);
+      const totalDelta = deltaFramesList.reduce((a, b) => a + b, 0);
+      const maxQueue = Math.max(...queues, 0);
+      const maxSocket = Math.max(...socketBuffers, 0);
+
+      const durationSec = stats.length > 1 
+        ? Math.round((stats[stats.length - 1].timestamp - stats[0].timestamp) / 1000) 
+        : stats.length;
+
+      document.getElementById('kpiTitle3').textContent = 'KeyFrame / Delta Ratio';
+      document.getElementById('kpiTitle4').textContent = 'Max Encoder Queue';
+      document.getElementById('kpiTitle5').textContent = 'Max Socket Buffer';
+      document.getElementById('chartTitle3').textContent = '⌛ Encoder Queue & Socket Backpressure';
+      document.getElementById('chartTitle4').textContent = '📦 Cumulative Data & Memory';
+
+      document.getElementById('kpiAvgBitrate').textContent = `${avgBitrate} Kbps`;
+      document.getElementById('kpiMaxBitrate').textContent = `Peak: ${peakBitrate} Kbps`;
+      document.getElementById('kpiAvgFps').textContent = `${avgFps} FPS`;
+      document.getElementById('kpiTotalFrames').textContent = `Total: ${totalKey + totalDelta} frames`;
+      document.getElementById('kpiFrameRatio').textContent = `1 : ${totalKey > 0 ? (totalDelta / totalKey).toFixed(1) : totalDelta}`;
+      document.getElementById('kpiKeyCount').textContent = `Key: ${totalKey} | Delta: ${totalDelta}`;
+      document.getElementById('kpiMaxQueue').textContent = `${maxQueue}`;
+      document.getElementById('kpiQueueStatus').textContent = maxQueue > 0 ? '⚠️ Enc Queue Lagged' : '✅ Smooth Encoding';
+      document.getElementById('kpiMaxSocket').textContent = `${maxSocket} B`;
+      document.getElementById('kpiDuration').textContent = `Duration: ${durationSec}s`;
+
+      // 1. Bitrate Chart
+      destroyCharts();
+
+      bitrateChartInstance = new Chart(document.getElementById('bitrateChart'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Bitrate (Kbps)',
+            data: bitrates,
+            borderColor: '#06b6d4',
+            backgroundColor: 'rgba(6, 182, 212, 0.15)',
+            fill: true,
+            tension: 0.3,
+            pointRadius: 2
+          }]
+        },
+        options: getChartOptions('Kbps')
+      });
+
+      // 2. FPS Chart
+      fpsChartInstance = new Chart(document.getElementById('fpsChart'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            {
+              label: 'FPS',
+              data: fpsList,
+              borderColor: '#10b981',
+              backgroundColor: 'rgba(16, 185, 129, 0.1)',
+              fill: true,
+              tension: 0.3,
+              pointRadius: 2
+            },
+            {
+              label: 'KeyFrames',
+              data: keyFramesList,
+              borderColor: '#ef4444',
+              backgroundColor: '#ef4444',
+              type: 'bar',
+              barThickness: 6
+            }
+          ]
+        },
+        options: getChartOptions('Count')
+      });
+
+      // 3. Queue Chart
+      queueChartInstance = new Chart(document.getElementById('queueChart'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            {
+              label: 'Encode Queue Size',
+              data: queues,
+              borderColor: '#f59e0b',
+              backgroundColor: 'rgba(245, 158, 11, 0.2)',
+              tension: 0.2,
+              pointRadius: 3
+            },
+            {
+              label: 'Socket Buffered Bytes',
+              data: socketBuffers,
+              borderColor: '#ef4444',
+              borderDash: [4, 4],
+              tension: 0.2,
+              pointRadius: 2
+            }
+          ]
+        },
+        options: getChartOptions('Queue / Bytes')
+      });
+
+      // 4. Cumulative & Memory Chart
+      const memoryList = stats.map(s => s.memoryUsedMb || 0);
+      const hasMemory = memoryList.some(m => m > 0);
+
+      cumulativeChartInstance = new Chart(document.getElementById('cumulativeChart'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            {
+              label: 'Cumulative Sent (KB)',
+              data: totalBytes.map(b => Math.round(b / 1024)),
+              borderColor: '#8b5cf6',
+              tension: 0.3,
+              pointRadius: 1,
+              yAxisID: 'y'
+            },
+            ...(hasMemory ? [{
+              label: 'JS Heap Memory (MB)',
+              data: memoryList,
+              borderColor: '#ec4899',
+              backgroundColor: 'rgba(236, 72, 153, 0.1)',
+              fill: true,
+              tension: 0.3,
+              pointRadius: 2,
+              yAxisID: 'y1'
+            }] : [])
+          ]
+        },
+        options: {
+          ...getChartOptions('Amount'),
+          scales: {
+            ...getChartOptions('KB').scales,
+            ...(hasMemory ? {
+              y1: {
+                position: 'right',
+                grid: { drawOnChartArea: false },
+                ticks: { color: '#ec4899', font: { family: 'JetBrains Mono', size: 10 } },
+                title: { display: true, text: 'RAM (MB)', color: '#ec4899', font: { size: 11 } }
+              }
+            } : {})
+          }
+        }
+      });
+    }
+
+    function renderConsumerDashboard(stats, metadata) {
+      const labels = stats.map(s => new Date(s.timestamp || s.timeIso).toLocaleTimeString());
+      const bitrates = stats.map(s => s.bitrateKbps || 0);
+
+      // Compute FPS delta or fallback to packet receiving rate if framesDecoded is 0 throughout the file
+      const allFramesZero = stats.every(s => (s.framesDecoded || 0) === 0 && (s.framesPerSecond || 0) === 0);
+
+      const fpsList = stats.map((s, idx) => {
+        if (typeof s.framesPerSecond === 'number' && s.framesPerSecond > 0) {
+          return s.framesPerSecond;
+        }
+        if (idx > 0 && typeof s.framesDecoded === 'number' && s.framesDecoded > 0) {
+          const prev = stats[idx - 1];
+          const timeDiff = (s.timestamp - prev.timestamp) / 1000;
+          if (timeDiff > 0 && typeof prev.framesDecoded === 'number') {
+            return Math.max(0, Math.round((s.framesDecoded - prev.framesDecoded) / timeDiff));
+          }
+        }
+        // Fallback for dump files where framesDecoded was 0 (e.g. RTX stream selected)
+        if (allFramesZero && idx > 0 && typeof s.packetsReceived === 'number') {
+          const prev = stats[idx - 1];
+          const timeDiff = (s.timestamp - prev.timestamp) / 1000;
+          if (timeDiff > 0 && typeof prev.packetsReceived === 'number') {
+            const pktDelta = s.packetsReceived - prev.packetsReceived;
+            return Math.max(0, Math.round(pktDelta / timeDiff));
+          }
+        }
+        return 0;
+      });
+
+      const packetsReceived = stats.map(s => s.packetsReceived || 0);
+      const packetsLost = stats.map(s => s.packetsLost || 0);
+      const jitterList = stats.map(s => typeof s.jitter === 'number' ? Math.round(s.jitter * 1000) : 0);
+      const bytesReceived = stats.map(s => s.bytesReceived || 0);
+      const memoryList = stats.map(s => s.memoryUsedMb || 0);
+
+      const avgBitrate = Math.round(bitrates.reduce((a, b) => a + b, 0) / (bitrates.length || 1));
+      const peakBitrate = Math.max(...bitrates, 0);
+      const avgFps = Math.round(fpsList.reduce((a, b) => a + b, 0) / (fpsList.length || 1));
+      const totalDecodedFrames = stats.length > 0 ? (stats[stats.length - 1].framesDecoded || 0) : 0;
+      const totalPackets = stats.length > 0 ? (stats[stats.length - 1].packetsReceived || 0) : 0;
+      const maxLost = Math.max(...packetsLost, 0);
+      const durationSec = stats.length > 1 
+        ? Math.round((stats[stats.length - 1].timestamp - stats[0].timestamp) / 1000) 
+        : stats.length;
+
+      // Update KPI Titles & Values for Consumer
+      document.getElementById('kpiTitle3').textContent = 'WebRTC Packets';
+      document.getElementById('kpiTitle4').textContent = 'Packets Lost';
+      document.getElementById('kpiTitle5').textContent = 'Session Duration';
+
+      document.getElementById('kpiAvgBitrate').textContent = `${avgBitrate} Kbps`;
+      document.getElementById('kpiMaxBitrate').textContent = `Peak: ${peakBitrate} Kbps`;
+      document.getElementById('kpiAvgFps').textContent = `${avgFps} FPS`;
+      document.getElementById('kpiTotalFrames').textContent = `Total Decoded: ${totalDecodedFrames}`;
+      document.getElementById('kpiFrameRatio').textContent = `${totalPackets}`;
+      document.getElementById('kpiKeyCount').textContent = `Total Packets Recv`;
+      document.getElementById('kpiMaxQueue').textContent = `${maxLost}`;
+      document.getElementById('kpiQueueStatus').textContent = maxLost > 0 ? '⚠️ Packets Lost Detected' : '✅ 0 Packet Loss';
+      document.getElementById('kpiMaxSocket').textContent = `${durationSec}s`;
+      document.getElementById('kpiDuration').textContent = `Samples: ${stats.length}`;
+
+      document.getElementById('chartTitle3').textContent = '📡 WebRTC Network Quality (Loss / Jitter)';
+      document.getElementById('chartTitle4').textContent = '📦 Cumulative Received Data (KB) & Memory';
+
+      destroyCharts();
+
+      // 1. Bitrate Chart
+      bitrateChartInstance = new Chart(document.getElementById('bitrateChart'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Inbound Bitrate (Kbps)',
+            data: bitrates,
+            borderColor: '#8b5cf6',
+            backgroundColor: 'rgba(139, 92, 246, 0.15)',
+            fill: true,
+            tension: 0.3,
+            pointRadius: 2
+          }]
+        },
+        options: getChartOptions('Kbps')
+      });
+
+      // 2. Decoded FPS Chart
+      fpsChartInstance = new Chart(document.getElementById('fpsChart'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Decoded FPS',
+            data: fpsList,
+            borderColor: '#10b981',
+            backgroundColor: 'rgba(16, 185, 129, 0.1)',
+            fill: true,
+            tension: 0.3,
+            pointRadius: 2
+          }]
+        },
+        options: getChartOptions('FPS')
+      });
+
+      // 3. WebRTC Quality Chart
+      queueChartInstance = new Chart(document.getElementById('queueChart'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            {
+              label: 'Packets Lost',
+              data: packetsLost,
+              borderColor: '#ef4444',
+              backgroundColor: 'rgba(239, 68, 68, 0.2)',
+              fill: true,
+              tension: 0.2,
+              pointRadius: 2
+            },
+            {
+              label: 'Jitter (ms)',
+              data: jitterList,
+              borderColor: '#f59e0b',
+              tension: 0.2,
+              pointRadius: 2
+            }
+          ]
+        },
+        options: getChartOptions('Count / ms')
+      });
+
+      // 4. Cumulative Data & Memory Chart
+      const hasMemory = memoryList.some(m => m > 0);
+      cumulativeChartInstance = new Chart(document.getElementById('cumulativeChart'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            {
+              label: 'Cumulative Received (KB)',
+              data: bytesReceived.map(b => Math.round(b / 1024)),
+              borderColor: '#3b82f6',
+              tension: 0.3,
+              pointRadius: 1,
+              yAxisID: 'y'
+            },
+            ...(hasMemory ? [{
+              label: 'JS Heap Memory (MB)',
+              data: memoryList,
+              borderColor: '#ec4899',
+              backgroundColor: 'rgba(236, 72, 153, 0.1)',
+              fill: true,
+              tension: 0.3,
+              pointRadius: 2,
+              yAxisID: 'y1'
+            }] : [])
+          ]
+        },
+        options: {
+          ...getChartOptions('KB'),
+          scales: {
+            ...getChartOptions('KB').scales,
+            ...(hasMemory ? {
+              y1: {
+                position: 'right',
+                grid: { drawOnChartArea: false },
+                ticks: { color: '#ec4899', font: { family: 'JetBrains Mono', size: 10 } },
+                title: { display: true, text: 'RAM (MB)', color: '#ec4899', font: { size: 11 } }
+              }
+            } : {})
+          }
+        }
+      });
+    }
+
+    function destroyCharts() {
+      if (bitrateChartInstance) bitrateChartInstance.destroy();
+      if (fpsChartInstance) fpsChartInstance.destroy();
+      if (queueChartInstance) queueChartInstance.destroy();
+      if (cumulativeChartInstance) cumulativeChartInstance.destroy();
+    }
+
+    function getChartOptions(yUnit) {
+      return {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            labels: { color: '#9ca3af', font: { family: 'Inter', size: 12 } }
+          },
+          tooltip: {
+            mode: 'index',
+            intersect: false
+          }
+        },
+        scales: {
+          x: {
+            grid: { color: '#1e293b' },
+            ticks: { color: '#9ca3af', font: { family: 'JetBrains Mono', size: 10 }, maxRotation: 45 }
+          },
+          y: {
+            grid: { color: '#1e293b' },
+            ticks: { color: '#9ca3af', font: { family: 'JetBrains Mono', size: 10 } },
+            title: { display: true, text: yUnit, color: '#6b7280', font: { size: 11 } }
+          }
+        }
+      };
+    }
+
+    // Events Table Renderer
+    function renderServerEventsTable(events) {
+      const tbody = document.getElementById('eventsTableBody');
+      tbody.innerHTML = '';
+
+      events.forEach(item => {
+        const tr = document.createElement('tr');
+        const timeStr = new Date(item.timeIso).toLocaleTimeString() + '.' + new Date(item.timeIso).getMilliseconds();
+        
+        tr.innerHTML = `
+          <td style="color: var(--text-muted);">${timeStr}</td>
+          <td><span class="event-tag">${item.event}</span></td>
+          <td style="color: #cbd5e1;">${JSON.stringify(item.data || {})}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    // Filter events table
+    document.getElementById('eventSearch').addEventListener('input', (e) => {
+      const term = e.target.value.toLowerCase();
+      const rows = document.querySelectorAll('#eventsTableBody tr');
+
+      rows.forEach(row => {
+        const text = row.textContent.toLowerCase();
+        row.style.display = text.includes(term) ? '' : 'none';
+      });
+    });
+  </script>
+</body>
+</html>

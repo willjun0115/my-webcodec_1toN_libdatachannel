@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>WebCodecs mediasoup 1:N</title>
-    <script type="module" crossorigin src="/assets/index-B2zeDL5r.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DMhFLXNX.css">
+    <script type="module" crossorigin src="/assets/index-C7Ttg-vG.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CdVMYFpw.css">
   </head>
   <body>
     <main class="shell">
@@ -14,7 +14,11 @@
           <h1>WebCodecs mediasoup 1:N</h1>
           <p>첫 접속자는 producer가 되고, 이후 접속자는 같은 WebCodecs stream을 consume합니다.</p>
         </div>
-        <button id="startButton" type="button">Start</button>
+        <div class="button-group">
+          <button id="startButton" type="button">Start</button>
+          <button id="dumpButton" type="button" class="secondary">Dump Stats</button>
+          <a href="/stats-visualizer.html" target="_blank" class="visualizer-btn">Visualizer 📊</a>
+        </div>
       </section>
 
       <section class="videoGrid">
@@ -23,7 +27,7 @@
           <figcaption id="localCaption">Producer preview</figcaption>
         </figure>
         <figure>
-          <video id="remoteVideo" playsinline autoplay></video>
+          <video id="remoteVideo" muted playsinline autoplay></video>
           <figcaption id="remoteCaption">Consumer playback</figcaption>
         </figure>
       </section>
@@ -41,6 +45,6 @@
       </section>
 
       <pre id="log"></pre>
-    </main>
+    </main>
   </body>
 </html>
