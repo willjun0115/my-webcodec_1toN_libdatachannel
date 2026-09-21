@@ -1,6 +1,8 @@
 import { defineConfig } from 'vite';
 import basicSsl from '@vitejs/plugin-basic-ssl';
 
+import { resolve } from 'node:path';
+
 export default defineConfig({
   plugins: [basicSsl()],
   server: {
@@ -15,6 +17,12 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    emptyOutDir: true
+    emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        main: resolve(__dirname, 'index.html'),
+        visualizer: resolve(__dirname, 'stats-visualizer.html')
+      }
+    }
   }
 });

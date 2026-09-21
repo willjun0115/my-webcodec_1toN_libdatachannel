@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>WebCodecs mediasoup 1:N</title>
-    <script type="module" crossorigin src="/assets/index-C7Ttg-vG.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CdVMYFpw.css">
+    <script type="module" crossorigin src="/assets/main-BppUQWTQ.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/main-TNlRp56b.css">
   </head>
   <body>
     <main class="shell">
@@ -32,10 +32,18 @@
         </figure>
       </section>
 
+      <section id="layerControls" class="layerControls" style="display: none;">
+        <span class="layerLabel">Simulcast Quality:</span>
+        <button id="layerHighBtn" type="button" class="layerBtn active">High (720p)</button>
+        <button id="layerLowBtn" type="button" class="layerBtn">Low (360p)</button>
+        <span id="activeLayerInfo" class="layerInfo">Active: High (720p)</span>
+      </section>
+
       <section class="stats">
         <div><span>Socket</span><strong id="socketState">idle</strong></div>
         <div><span>Role</span><strong id="roleState">idle</strong></div>
         <div><span>Peer ID</span><strong id="peerId">-</strong></div>
+        <div><span>Simulcast</span><strong id="simulcastState">-</strong></div>
         <div><span>Connected consumers</span><strong id="consumerCount">0</strong></div>
         <div><span>Encoded chunks</span><strong id="chunkCount">0</strong></div>
         <div><span>Injected RTP packets</span><strong id="packetCount">0</strong></div>

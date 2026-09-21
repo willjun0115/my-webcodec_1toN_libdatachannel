@@ -8,6 +8,8 @@
     "client": "vite --host 0.0.0.0",
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "build": "tsc --noEmit && vite build",
+    "start": "tsx src/server.ts",
+    "serve": "npm run build && npm run start",
     "preview": "vite preview --host 0.0.0.0",
     "test": "npm run build"
   },

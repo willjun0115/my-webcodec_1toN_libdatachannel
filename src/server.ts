@@ -1,15 +1,18 @@
-import { createServer } from 'node:http';
+import fs from 'node:fs';
+import { createServer as createHttpServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import * as mediasoup from '../../mediasoup/node/lib/index.js';
-// @ts-ignore
 import {
-  injectEncodedChunk,
-  setupPipeline
-} from '../../mediasoup/node/lib/webCodecsPipeline.js';
+  WebCodecsSimulcastPipeline,
+  PIPELINE_SSRC_LOW,
+  PIPELINE_SSRC_HIGH,
+  PIPELINE_PAYLOAD_TYPE
+} from './simulcastPipeline.js';
 import type * as MediasoupTypes from '../../mediasoup/node/lib/types.js';
 
 // 파일 및 디렉터리 경로 설정
@@ -82,9 +85,6 @@ function getLocalIp(): string {
 
 // mediasoup WebRTC 트랜스포트에 발표할 외부/LAN IP 주소
 const ANNOUNCED_IP = getLocalIp();
-// WebCodecs 파이프라인 전용 SSRC 및 H.264 PayloadType 설정
-const PIPELINE_SSRC = 12345678;
-const PIPELINE_PAYLOAD_TYPE = 96;
 
 // 클라이언트 피어의 역할: 방송 송신자(producer) 또는 시청 수신자(consumer)
 type PeerRole = 'producer' | 'consumer';
@@ -99,6 +99,7 @@ type JsonMessage = {
 // WebCodecs 바이너리 청크 패킷의 JSON 헤더 규격
 type EncodedChunkHeader = {
   event: 'encodedChunk';
+  layer?: number; // 0: low (360p), 1: high (720p)
   timestamp: number;
   type: 'key' | 'delta';
   duration?: number;
@@ -120,13 +121,44 @@ type PeerState = {
   statsTimer?: NodeJS.Timeout;
 };
 
-// Express 서버 및 WebSocket 시그널링 서버 생성
+// Express 앱 생성
 const app = express();
-const httpServer = createServer(app);
-const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+
+// SSL 인증서 경로 설정 (기본: C:\Windows\System32\cert.pem, key.pem)
+const defaultCertPath = process.platform === 'win32'
+  ? path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'cert.pem')
+  : '/etc/ssl/certs/cert.pem';
+const defaultKeyPath = process.platform === 'win32'
+  ? path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'key.pem')
+  : '/etc/ssl/private/key.pem';
+
+const certPath = process.env.SSL_CERT_PATH ?? defaultCertPath;
+const keyPath = process.env.SSL_KEY_PATH ?? defaultKeyPath;
+
+let isHttps = false;
+let server: ReturnType<typeof createHttpServer> | ReturnType<typeof createHttpsServer>;
+
+if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
+  try {
+    const cert = fs.readFileSync(certPath);
+    const key = fs.readFileSync(keyPath);
+    server = createHttpsServer({ cert, key }, app);
+    isHttps = true;
+    console.log(`[signaling] Loaded SSL certificate from ${certPath}`);
+  } catch (err) {
+    console.warn('[signaling] Failed to load SSL certificate, falling back to HTTP:', err);
+    server = createHttpServer(app);
+  }
+} else {
+  server = createHttpServer(app);
+}
+
+const wss = new WebSocketServer({ server, path: '/ws' });
 const peers = new Map<string, PeerState>();
 
 // mediasoup 글로벌 객체
+const simulcastPipeline = new WebCodecsSimulcastPipeline();
+let worker: MediasoupTypes.Worker | undefined;
 let router: MediasoupTypes.Router;
 let producer: MediasoupTypes.Producer | undefined;
 let producerPeerId: string | undefined;
@@ -166,8 +198,13 @@ wss.on('connection', async socket => {
         role: peer.role,
         producerPeerId,
         producerId: producer?.id,
-        ssrc: PIPELINE_SSRC,
+        ssrc: PIPELINE_SSRC_HIGH,
         payloadType: PIPELINE_PAYLOAD_TYPE,
+        simulcast: true,
+        layers: [
+          { id: 0, rid: 'q', label: 'Low (360p)', ssrc: PIPELINE_SSRC_LOW },
+          { id: 1, rid: 'h', label: 'High (720p)', ssrc: PIPELINE_SSRC_HIGH }
+        ],
         consumerCount: countConsumers()
       }
     })
@@ -197,11 +234,36 @@ wss.on('connection', async socket => {
   });
 });
 
-// HTTP/WebSocket 시그널링 서버 대기
-httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
-  console.log(`[signaling] HTTP/WebSocket server listening on http://0.0.0.0:${HTTP_PORT}`);
-  console.log(`[signaling] WebRTC Announced IP: ${ANNOUNCED_IP}`);
+// HTTP/HTTPS & WebSocket 서버 에러 핸들러 (포트 충돌 등)
+server.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`[error] Port ${HTTP_PORT} is already in use. Please terminate the previous process or wait a few seconds.`);
+  } else {
+    console.error('[error] Server error:', err);
+  }
+  worker?.close();
+  process.exit(1);
 });
+
+// HTTP/HTTPS & WebSocket 시그널링 서버 대기
+server.listen(HTTP_PORT, '0.0.0.0', () => {
+  const proto = isHttps ? 'https' : 'http';
+  console.log(`[signaling] ${proto.toUpperCase()}/WebSocket server listening on ${proto}://0.0.0.0:${HTTP_PORT}`);
+  console.log(`[signaling] WebRTC Announced IP: ${ANNOUNCED_IP}`);
+  console.log(`[signaling] Access URL: ${proto}://${ANNOUNCED_IP}:${HTTP_PORT} or ${proto}://localhost:${HTTP_PORT}`);
+});
+
+// 정상 종료 처리 (Ctrl+C 등)
+function shutdown(): void {
+  console.log('\n[signaling] Shutting down gracefully...');
+  wss.close();
+  server.close();
+  simulcastPipeline.close();
+  worker?.close();
+  process.exit(0);
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 
 /**
  * mediasoup 초기화 함수
@@ -209,7 +271,7 @@ httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
  * - H.264 프로파일(42e01f)을 지원하는 Router 부트스트랩
  */
 async function bootstrapMediasoup(): Promise<void> {
-  const worker = await mediasoup.createWorker({
+  worker = await mediasoup.createWorker({
     workerBin: localWorkerBin,
     logLevel: 'warn',
     rtcMinPort: 40000,
@@ -259,13 +321,9 @@ async function registerPeer(socket: WebSocket): Promise<PeerState> {
     producerPeerId = id;
     injectedChunks = 0;
     injectedPackets = 0;
-    // WebCodecs H.264 비트스트림을 주입받을 단일 DirectTransport Producer 생성
-    producer = await setupPipeline(router, {
-      ssrc: PIPELINE_SSRC,
-      payloadType: PIPELINE_PAYLOAD_TYPE,
-      profileLevelId: '42e01f'
-    });
-    console.log(`[room] ${id} joined as producer, pipeline producer ${producer?.id}`);
+    // WebCodecs H.264 멀티 SSRC 시뮬캐스트 DirectTransport Producer 생성
+    producer = await simulcastPipeline.setup(router, '42e01f');
+    console.log(`[room] ${id} joined as producer, simulcast producer ${producer?.id}`);
   } else {
     console.log(`[room] ${id} joined as consumer of ${producerPeerId}`);
   }
@@ -381,11 +439,20 @@ async function handleRequest(
       stopStatsPump(peer);
     });
 
+    peer.consumer.on('layerschange', (layers: MediasoupTypes.ConsumerLayers | undefined) => {
+      console.log(`[room] Consumer ${peer.id} layerschange:`, layers);
+      socket.send(JSON.stringify({
+        event: 'consumerLayersChanged',
+        data: layers
+      }));
+    });
+
     reply(socket, id, {
       id: peer.consumer.id,
       producerId: producer.id,
       kind: peer.consumer.kind,
-      rtpParameters: peer.consumer.rtpParameters
+      rtpParameters: peer.consumer.rtpParameters,
+      type: peer.consumer.type
     });
     return;
   }
@@ -401,6 +468,21 @@ async function handleRequest(
     await peer.consumer.resume();
     startStatsPump(socket, peer);
     reply(socket, id, {});
+    return;
+  }
+
+  // 6. Consumer 시뮬캐스트 레이어 변경 요청
+  if (action === 'setConsumerPreferredLayers') {
+    assertConsumerPeer(peer);
+
+    if (!peer.consumer) {
+      throw new Error('Consumer does not exist');
+    }
+
+    const { spatialLayer } = data as { spatialLayer: number };
+    await peer.consumer.setPreferredLayers({ spatialLayer });
+    console.log(`[room] Consumer ${peer.id} set preferred spatial layer: ${spatialLayer}`);
+    reply(socket, id, { spatialLayer });
     return;
   }
 
@@ -439,8 +521,10 @@ function handleEncodedChunk(peer: PeerState, raw: RawData): void {
   const descriptionBase64 =
     header.metadata?.decoderConfig?.descriptionBase64;
 
-  // 3. mediasoup C++ 내부 RTP 파이프라인으로 H.264 비트스트림 직접 주입
-  injectEncodedChunk(
+  // 3. mediasoup C++ 내부 RTP 파이프라인으로 H.264 비트스트림 직접 주입 (시뮬캐스트 레이어 지정)
+  const layerIndex = header.layer ?? 0;
+  simulcastPipeline.injectChunk(
+    layerIndex,
     header.duration === undefined
       ? {
         data,
@@ -454,12 +538,6 @@ function handleEncodedChunk(peer: PeerState, raw: RawData): void {
         duration: header.duration
       },
     descriptionBase64
-      ? {
-        decoderConfig: {
-          description: Buffer.from(descriptionBase64, 'base64')
-        }
-      }
-      : undefined
   );
 
   injectedChunks++;
@@ -493,6 +571,7 @@ function cleanupPeer(peer: PeerState): void {
 
   if (peer.id === producerPeerId) {
     console.log(`[room] producer ${peer.id} disconnected`);
+    simulcastPipeline.close();
     producer?.close();
     producer = undefined;
     producerPeerId = undefined;

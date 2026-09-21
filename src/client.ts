@@ -38,6 +38,11 @@ const packetCount = document.querySelector<HTMLElement>('#packetCount')!;
 const consumerState = document.querySelector<HTMLElement>('#consumerState')!;
 const rtpReceived = document.querySelector<HTMLElement>('#rtpReceived')!;
 const framesDecoded = document.querySelector<HTMLElement>('#framesDecoded')!;
+const simulcastState = document.querySelector<HTMLElement>('#simulcastState')!;
+const layerControls = document.querySelector<HTMLElement>('#layerControls')!;
+const layerHighBtn = document.querySelector<HTMLButtonElement>('#layerHighBtn')!;
+const layerLowBtn = document.querySelector<HTMLButtonElement>('#layerLowBtn')!;
+const activeLayerInfo = document.querySelector<HTMLElement>('#activeLayerInfo')!;
 const logBox = document.querySelector<HTMLPreElement>('#log')!;
 
 // 통계 데이터 덤프 규격 (webrtc-internals style custom stats)
@@ -53,6 +58,10 @@ interface ProducerStatSample {
   deltaFrames: number;
   encodeQueueSize: number;
   socketBufferedAmount: number;
+  simulcastLayers?: {
+    high: { chunks: number; bytes: number; fps: number };
+    low: { chunks: number; bytes: number; fps: number };
+  };
   memoryUsedMb?: number | undefined;
   eventLoopLagMs?: number | undefined;
 }
@@ -105,12 +114,20 @@ const producerStatsHistory: ProducerStatSample[] = [];
 const consumerStatsHistory: ConsumerStatSample[] = [];
 const serverEventsLog: ServerEventLogEntry[] = [];
 
-let activeEncoder: VideoEncoder | null = null;
+let activeEncoderHigh: VideoEncoder | null = null;
+let activeEncoderLow: VideoEncoder | null = null;
+let currentPreferredSpatialLayer = 1; // 1: High (720p), 0: Low (360p)
+
 let recentChunksCount = 0;
 let recentBytesSent = 0;
 let totalBytesSent = 0;
 let recentKeyFrames = 0;
 let recentDeltaFrames = 0;
+let recentChunksLayer0 = 0;
+let recentChunksLayer1 = 0;
+let recentBytesLayer0 = 0;
+let recentBytesLayer1 = 0;
+
 let lastConsumerBytesReceived = 0;
 let lastConsumerTimestamp = 0;
 let lastConsumerFramesDecoded = 0;
@@ -128,6 +145,35 @@ startButton.addEventListener('click', () => {
 // 'Dump Stats' 버튼 클릭 시 통계 JSON 파일 다운로드
 dumpButton.addEventListener('click', () => {
   exportStatsDump();
+});
+
+// 시뮬캐스트 화질 전환 핸들러 (Consumer)
+async function selectSimulcastLayer(spatialLayer: number): Promise<void> {
+  currentPreferredSpatialLayer = spatialLayer;
+  if (spatialLayer === 1) {
+    layerHighBtn.classList.add('active');
+    layerLowBtn.classList.remove('active');
+    activeLayerInfo.textContent = 'Requested: High (720p)';
+  } else {
+    layerLowBtn.classList.add('active');
+    layerHighBtn.classList.remove('active');
+    activeLayerInfo.textContent = 'Requested: Low (360p)';
+  }
+
+  try {
+    await request('setConsumerPreferredLayers', { spatialLayer });
+    writeLog(`Requested simulcast spatialLayer: ${spatialLayer}`);
+  } catch (err) {
+    writeLog(`Failed to change layer: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+layerHighBtn.addEventListener('click', () => {
+  void selectSimulcastLayer(1);
+});
+
+layerLowBtn.addEventListener('click', () => {
+  void selectSimulcastLayer(0);
 });
 
 /**
@@ -271,13 +317,32 @@ function handleEvent(message: ResponseMessage): void {
       peerId: string;
       role: PeerRole;
       consumerCount: number;
+      simulcast?: boolean;
     };
 
     role = assignment.role;
     roleState.textContent = assignment.role;
     peerIdLabel.textContent = assignment.peerId;
     consumerCount.textContent = String(assignment.consumerCount);
-    writeLog(`assigned as ${assignment.role}`);
+
+    if (role === 'producer') {
+      simulcastState.textContent = '2 Layers (720p/360p)';
+      layerControls.style.display = 'none';
+    } else {
+      simulcastState.textContent = 'Active (Receiver)';
+      layerControls.style.display = 'flex';
+    }
+
+    writeLog(`assigned as ${assignment.role} (simulcast: ${assignment.simulcast ? 'yes' : 'no'})`);
+    return;
+  }
+
+  if (message.event === 'consumerLayersChanged') {
+    const layers = message.data as { spatialLayer?: number; temporalLayer?: number } | undefined;
+    const sl = layers?.spatialLayer;
+    const label = sl === 1 ? 'High (720p)' : sl === 0 ? 'Low (360p)' : 'Switching...';
+    activeLayerInfo.textContent = `Active: ${label}`;
+    writeLog(`[simulcast] Consumer layer changed: ${label} (spatial: ${sl ?? 'none'})`);
     return;
   }
 
@@ -414,8 +479,16 @@ async function setupConsumer(): Promise<void> {
   remoteVideo.muted = true;
   remoteVideo.playsInline = true;
 
-  // 5. Consumer 일시정지 해제 및 재생
+  // 5. Consumer 일시정지 해제 및 기본 화질(High) 지정
   await request('resumeConsumer');
+  try {
+    await request('setConsumerPreferredLayers', {
+      spatialLayer: currentPreferredSpatialLayer
+    });
+  } catch (err) {
+    console.warn('Failed to set initial preferred layer:', err);
+  }
+
   void remoteVideo.play().catch(error => {
     writeLog(`remote video play failed: ${error.message}`);
   });
@@ -513,11 +586,11 @@ function pollConsumerStats(
 }
 
 /**
- * Producer 전용 WebCodecs 인코딩 파이프라인 함수
+ * Producer 전용 WebCodecs 시뮬캐스트(Simulcast) 인코딩 파이프라인 함수
  * 1. MediaStreamTrackProcessor로 프레임(VideoFrame) 리더 생성
- * 2. OffscreenCanvas 준비 및 캔버스 상 자막 오버레이 합성
- * 3. VideoEncoder (avc1.42E01F) 실시간 H.264 인코더 구성
- * 4. pumpFrames 루프에서 2초마다 KeyFrame 설정하여 인코딩
+ * 2. High (1280x720 @ 1.5Mbps) 및 Low (640x360 @ 350kbps) 듀얼 OffscreenCanvas 준비
+ * 3. 듀얼 VideoEncoder (avc1.42E01F) 실시간 H.264 인코더 구성
+ * 4. pumpFrames 루프에서 동일한 타임스탬프로 High/Low 동시 인코딩 및 키프레임 동기화
  */
 async function startEncoder(stream: MediaStream): Promise<void> {
   const track = stream.getVideoTracks()[0];
@@ -531,51 +604,89 @@ async function startEncoder(stream: MediaStream): Promise<void> {
   const processor = new Processor({ track });
   const reader = processor.readable.getReader();
   const settings = track.getSettings();
-  const width = settings.width ?? 640;
-  const height = settings.height ?? 360;
-  const frameRate = settings.frameRate ?? 30;
-  const canvas = new OffscreenCanvas(width, height);
-  const context = canvas.getContext('2d');
-  let frameIndex = 0;
 
-  if (!context) {
+  const widthHigh = settings.width ?? 1280;
+  const heightHigh = settings.height ?? 720;
+  const widthLow = Math.max(320, Math.floor(widthHigh / 2) & ~1);
+  const heightLow = Math.max(180, Math.floor(heightHigh / 2) & ~1);
+  const frameRate = settings.frameRate ?? 30;
+
+  // 2. High / Low 오프스크린 캔버스 및 2D 컨텍스트 준비
+  const canvasHigh = new OffscreenCanvas(widthHigh, heightHigh);
+  const rawCtxHigh = canvasHigh.getContext('2d');
+  const canvasLow = new OffscreenCanvas(widthLow, heightLow);
+  const rawCtxLow = canvasLow.getContext('2d');
+
+  if (!rawCtxHigh || !rawCtxLow) {
     throw new Error('OffscreenCanvas 2D context is unavailable');
   }
 
-  const ctx = context;
+  const ctxHigh: OffscreenCanvasRenderingContext2D = rawCtxHigh;
+  const ctxLow: OffscreenCanvasRenderingContext2D = rawCtxLow;
 
-  // 2. H.264 하드웨어 가속 실시간 인코더 설정
-  const config: VideoEncoderConfig = {
-    codec: 'avc1.42E01F', // H.264 Constrained Baseline Profile
-    width,
-    height,
+  let frameIndex = 0;
+
+  // 3. H.264 High Layer (Layer 1) 설정
+  const configHigh: VideoEncoderConfig = {
+    codec: 'avc1.42E01F',
+    width: widthHigh,
+    height: heightHigh,
     framerate: frameRate,
-    bitrate: 1_200_000,
-    latencyMode: 'realtime', // 초저지연 모드
+    bitrate: 1_500_000,
+    latencyMode: 'realtime',
     hardwareAcceleration: 'prefer-hardware',
     avc: { format: 'avc' }
   };
-  const support = await VideoEncoder.isConfigSupported(config);
 
-  if (!support.supported) {
-    throw new Error(`VideoEncoder config is not supported: ${JSON.stringify(config)}`);
+  // 4. H.264 Low Layer (Layer 0) 설정
+  const configLow: VideoEncoderConfig = {
+    codec: 'avc1.42E01F',
+    width: widthLow,
+    height: heightLow,
+    framerate: frameRate,
+    bitrate: 350_000,
+    latencyMode: 'realtime',
+    hardwareAcceleration: 'prefer-hardware',
+    avc: { format: 'avc' }
+  };
+
+  const [supportHigh, supportLow] = await Promise.all([
+    VideoEncoder.isConfigSupported(configHigh),
+    VideoEncoder.isConfigSupported(configLow)
+  ]);
+
+  if (!supportHigh.supported || !supportLow.supported) {
+    throw new Error('VideoEncoder does not support the simulcast configuration');
   }
 
-  // 3. WebCodecs VideoEncoder 인스턴스 생성
-  const encoder = new VideoEncoder({
+  // 5. High 인코더 (Layer 1)
+  const encoderHigh = new VideoEncoder({
     output: (chunk, metadata) => {
-      // 인코딩 완료된 H.264 청크(비트스트림)를 WebSocket으로 송신
-      sendEncodedChunk(chunk, metadata);
+      sendEncodedChunk(1, chunk, metadata);
     },
     error: error => {
-      writeLog(`encoder error: ${error.message}`);
+      writeLog(`encoder (high) error: ${error.message}`);
     }
   });
+  encoderHigh.configure(supportHigh.config ?? configHigh);
+  activeEncoderHigh = encoderHigh;
 
-  encoder.configure(support.config ?? config);
-  activeEncoder = encoder;
+  // 6. Low 인코더 (Layer 0)
+  const encoderLow = new VideoEncoder({
+    output: (chunk, metadata) => {
+      sendEncodedChunk(0, chunk, metadata);
+    },
+    error: error => {
+      writeLog(`encoder (low) error: ${error.message}`);
+    }
+  });
+  encoderLow.configure(supportLow.config ?? configLow);
+  activeEncoderLow = encoderLow;
+
   startProducerStatsSampling();
-  writeLog(`encoder configured: ${width}x${height}@${Math.round(frameRate)}`);
+  writeLog(
+    `simulcast encoders configured: High ${widthHigh}x${heightHigh} (1.5M), Low ${widthLow}x${heightLow} (350k) @ ${Math.round(frameRate)}fps`
+  );
 
   void pumpFrames();
 
@@ -592,46 +703,56 @@ async function startEncoder(stream: MediaStream): Promise<void> {
     }
   }
 
-  // Canvas 그래픽 오버레이 처리 후 VideoEncoder에 전달
+  // Canvas 그래픽 오버레이 처리 후 High/Low 인코더 동시 전달
   function encodeFrame(frame: VideoFrame): void {
     frameIndex++;
 
-    let processedFrame: VideoFrame | undefined;
+    let frameHigh: VideoFrame | undefined;
+    let frameLow: VideoFrame | undefined;
 
     try {
-      const frameWidth = frame.displayWidth || frame.codedWidth || width;
-      const frameHeight = frame.displayHeight || frame.codedHeight || height;
+      const isKey = frameIndex % Math.max(1, Math.floor(frameRate * 2)) === 1;
 
-      if (canvas.width !== frameWidth || canvas.height !== frameHeight) {
-        canvas.width = frameWidth;
-        canvas.height = frameHeight;
-      }
+      // --- High Layer 렌더링 ---
+      ctxHigh.drawImage(frame, 0, 0, widthHigh, heightHigh);
+      ctxHigh.fillStyle = 'rgba(10, 92, 120, 0.85)';
+      ctxHigh.fillRect(14, 14, 280, 72);
+      ctxHigh.fillStyle = '#ffffff';
+      ctxHigh.font = 'bold 20px sans-serif';
+      ctxHigh.fillText('Producer [High 720p]', 24, 46);
+      ctxHigh.font = '14px sans-serif';
+      ctxHigh.fillText(`frame ${frameIndex} | 1.5 Mbps`, 24, 70);
 
-      // 캔버스에 영상 렌더링 및 자막 오버레이 그래픽 합성
-      ctx.drawImage(frame, 0, 0, frameWidth, frameHeight);
-      ctx.fillStyle = 'rgba(10, 92, 120, 0.78)';
-      ctx.fillRect(14, 14, 250, 72);
-      ctx.fillStyle = '#ffffff';
-      ctx.font = '20px sans-serif';
-      ctx.fillText('1:N Producer', 24, 46);
-      ctx.font = '14px sans-serif';
-      ctx.fillText(`encoded frame ${frameIndex}`, 24, 70);
-
-      // 합성된 캔버스 기반으로 새로운 VideoFrame 생성
-      processedFrame = new VideoFrame(
-        canvas,
+      frameHigh = new VideoFrame(
+        canvasHigh,
         frame.duration === null
           ? { timestamp: frame.timestamp }
           : { timestamp: frame.timestamp, duration: frame.duration }
       );
+      encoderHigh.encode(frameHigh, { keyFrame: isKey });
 
-      // 2초(약 60프레임)마다 키프레임(KeyFrame) 강제 생성 요청
-      encoder.encode(processedFrame, {
-        keyFrame: frameIndex % Math.max(1, Math.floor(frameRate * 2)) === 1
-      });
+      // --- Low Layer 렌더링 ---
+      ctxLow.drawImage(frame, 0, 0, widthLow, heightLow);
+      ctxLow.fillStyle = 'rgba(30, 41, 59, 0.85)';
+      ctxLow.fillRect(10, 10, 210, 56);
+      ctxLow.fillStyle = '#38bdf8';
+      ctxLow.font = 'bold 15px sans-serif';
+      ctxLow.fillText('Producer [Low 360p]', 18, 34);
+      ctxLow.font = '12px sans-serif';
+      ctxLow.fillStyle = '#e2e8f0';
+      ctxLow.fillText(`frame ${frameIndex} | 350 kbps`, 18, 52);
+
+      frameLow = new VideoFrame(
+        canvasLow,
+        frame.duration === null
+          ? { timestamp: frame.timestamp }
+          : { timestamp: frame.timestamp, duration: frame.duration }
+      );
+      encoderLow.encode(frameLow, { keyFrame: isKey });
     } finally {
       frame.close();
-      processedFrame?.close();
+      frameHigh?.close();
+      frameLow?.close();
     }
   }
 }
@@ -645,8 +766,10 @@ function startProducerStatsSampling(): void {
   producerSamplingTimer = window.setInterval(() => {
     if (!role || role !== 'producer') return;
 
+    const now = Date.now();
+
     const stat: ProducerStatSample = {
-      timestamp: Date.now(),
+      timestamp: now,
       timeIso: new Date().toISOString(),
       fps: recentChunksCount,
       bitrateKbps: Math.round((recentBytesSent * 8) / 1000),
@@ -655,8 +778,22 @@ function startProducerStatsSampling(): void {
       totalBytesSent,
       keyFrames: recentKeyFrames,
       deltaFrames: recentDeltaFrames,
-      encodeQueueSize: activeEncoder ? activeEncoder.encodeQueueSize : 0,
+      encodeQueueSize:
+        (activeEncoderHigh ? activeEncoderHigh.encodeQueueSize : 0) +
+        (activeEncoderLow ? activeEncoderLow.encodeQueueSize : 0),
       socketBufferedAmount: socket ? socket.bufferedAmount : 0,
+      simulcastLayers: {
+        high: {
+          chunks: recentChunksLayer1,
+          bytes: recentBytesLayer1,
+          fps: recentChunksLayer1
+        },
+        low: {
+          chunks: recentChunksLayer0,
+          bytes: recentBytesLayer0,
+          fps: recentChunksLayer0
+        }
+      },
       memoryUsedMb: getMemoryUsageMb()
     };
 
@@ -666,6 +803,10 @@ function startProducerStatsSampling(): void {
     recentBytesSent = 0;
     recentKeyFrames = 0;
     recentDeltaFrames = 0;
+    recentChunksLayer0 = 0;
+    recentChunksLayer1 = 0;
+    recentBytesLayer0 = 0;
+    recentBytesLayer1 = 0;
   }, 1000);
 }
 
@@ -687,9 +828,10 @@ function getMemoryUsageMb(): number | undefined {
 
 /**
  * 인코딩된 WebCodecs H.264 청크(EncodedVideoChunk)를 바이너리 패킷으로 송신하는 함수
- * - 패킷 구성: [4바이트 Header 길이] + [JSON Header (SPS/PPS 메타데이터)] + [Raw H.264 Bitstream Data]
+ * - 패킷 구성: [4바이트 Header 길이] + [JSON Header (SPS/PPS 메타데이터, layer)] + [Raw H.264 Bitstream Data]
  */
 function sendEncodedChunk(
+  layer: number,
   chunk: EncodedVideoChunk,
   metadata?: EncodedVideoChunkMetadata
 ): void {
@@ -701,6 +843,7 @@ function sendEncodedChunk(
   const description = metadata?.decoderConfig?.description;
   const header = {
     event: 'encodedChunk',
+    layer,
     timestamp: chunk.timestamp,
     type: chunk.type as BrowserChunkType,
     duration: chunk.duration,
@@ -733,6 +876,15 @@ function sendEncodedChunk(
   recentChunksCount++;
   recentBytesSent += chunk.byteLength;
   totalBytesSent += chunk.byteLength;
+
+  if (layer === 1) {
+    recentChunksLayer1++;
+    recentBytesLayer1 += chunk.byteLength;
+  } else {
+    recentChunksLayer0++;
+    recentBytesLayer0 += chunk.byteLength;
+  }
+
   if (chunk.type === 'key') {
     recentKeyFrames++;
   } else {
