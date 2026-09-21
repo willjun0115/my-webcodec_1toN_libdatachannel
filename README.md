@@ -11,6 +11,7 @@
 - mediasoup WebRTC transport를 통한 consumer 수신
 - producer/consumer 역할 자동 할당
 - 연결 상태, RTP 패킷, 디코딩 프레임 수 등 기본 통계 표시
+- 브라우저 로그는 최근 50줄만 유지하고, 파이프라인 상태는 초당 1회로 압축 전송
 
 ## 요구 사항
 
@@ -102,6 +103,7 @@ This project is a 1:N streaming example that encodes camera video with the brows
 - Consumer receiving through mediasoup WebRTC transports
 - Automatic producer/consumer role assignment
 - Basic status and stats display, including connection state, RTP packets, and decoded frames
+- Browser logs retain only the latest 50 lines, and pipeline telemetry is compacted to one update per second
 
 ## Requirements
 
