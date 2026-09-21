@@ -118,6 +118,10 @@ const MAX_SERVER_EVENT_ENTRIES = 100;
 let activeEncoderHigh: VideoEncoder | null = null;
 let activeEncoderLow: VideoEncoder | null = null;
 let currentPreferredSpatialLayer = 1; // 1: High (720p), 0: Low (360p)
+// Keep the real-time pipeline bounded: stale frames are worse than dropped frames.
+const MAX_ENCODE_QUEUE_SIZE = 2;
+const MAX_SOCKET_BUFFERED_AMOUNT = 512 * 1024;
+let forceNextKeyFrame = true;
 
 let recentChunksCount = 0;
 let recentBytesSent = 0;
@@ -340,6 +344,13 @@ function handleEvent(message: ResponseMessage): void {
     return;
   }
 
+  if (message.event === 'requestKeyFrame') {
+    // A newly resumed consumer or a layer switch must begin at a decodable frame.
+    forceNextKeyFrame = true;
+    writeLog('key frame requested by server');
+    return;
+  }
+
   if (message.event === 'consumerLayersChanged') {
     const layers = message.data as { spatialLayer?: number; temporalLayer?: number } | undefined;
     const sl = layers?.spatialLayer;
@@ -473,8 +484,8 @@ async function setupConsumer(): Promise<void> {
   remoteVideo.muted = true;
   remoteVideo.playsInline = true;
 
-  // 5. Consumer 일시정지 해제 및 기본 화질(High) 지정
-  await request('resumeConsumer');
+  // Select the target layer before resuming so the receiver never starts on the
+  // wrong layer and then waits for another switch/key frame.
   try {
     await request('setConsumerPreferredLayers', {
       spatialLayer: currentPreferredSpatialLayer
@@ -482,6 +493,7 @@ async function setupConsumer(): Promise<void> {
   } catch (err) {
     writeLog(`Failed to set initial preferred layer: ${err instanceof Error ? err.message : String(err)}`);
   }
+  await request('resumeConsumer');
 
   void remoteVideo.play().catch(error => {
     writeLog(`remote video play failed: ${error.message}`);
@@ -582,7 +594,7 @@ function pollConsumerStats(
 /**
  * Producer 전용 WebCodecs 시뮬캐스트(Simulcast) 인코딩 파이프라인 함수
  * 1. MediaStreamTrackProcessor로 프레임(VideoFrame) 리더 생성
- * 2. High (1280x720 @ 1.5Mbps) 및 Low (640x360 @ 350kbps) 듀얼 OffscreenCanvas 준비
+ * 2. High layer is passed through directly; only Low uses an OffscreenCanvas resize.
  * 3. 듀얼 VideoEncoder (avc1.42E01F) 실시간 H.264 인코더 구성
  * 4. pumpFrames 루프에서 동일한 타임스탬프로 High/Low 동시 인코딩 및 키프레임 동기화
  */
@@ -605,17 +617,14 @@ async function startEncoder(stream: MediaStream): Promise<void> {
   const heightLow = Math.max(180, Math.floor(heightHigh / 2) & ~1);
   const frameRate = settings.frameRate ?? 30;
 
-  // 2. High / Low 오프스크린 캔버스 및 2D 컨텍스트 준비
-  const canvasHigh = new OffscreenCanvas(widthHigh, heightHigh);
-  const rawCtxHigh = canvasHigh.getContext('2d');
+  // Only the low layer requires a pixel copy/resize. Avoiding a second 720p
+  // canvas composition substantially reduces screen-share capture latency.
   const canvasLow = new OffscreenCanvas(widthLow, heightLow);
   const rawCtxLow = canvasLow.getContext('2d');
 
-  if (!rawCtxHigh || !rawCtxLow) {
+  if (!rawCtxLow) {
     throw new Error('OffscreenCanvas 2D context is unavailable');
   }
-
-  const ctxHigh: OffscreenCanvasRenderingContext2D = rawCtxHigh;
   const ctxLow: OffscreenCanvasRenderingContext2D = rawCtxLow;
 
   let frameIndex = 0;
@@ -697,45 +706,43 @@ async function startEncoder(stream: MediaStream): Promise<void> {
     }
   }
 
-  // Canvas 그래픽 오버레이 처리 후 High/Low 인코더 동시 전달
+  // Drop old capture frames instead of allowing VideoEncoder/WebSocket queues to
+  // grow. This bounds glass-to-glass latency under CPU or network pressure.
   function encodeFrame(frame: VideoFrame): void {
-    frameIndex++;
+    const congested =
+      encoderHigh.encodeQueueSize > MAX_ENCODE_QUEUE_SIZE ||
+      encoderLow.encodeQueueSize > MAX_ENCODE_QUEUE_SIZE ||
+      socket.bufferedAmount > MAX_SOCKET_BUFFERED_AMOUNT;
 
+    if (congested) {
+      forceNextKeyFrame = true;
+      frame.close();
+      return;
+    }
+
+    frameIndex++;
     let frameHigh: VideoFrame | undefined;
     let frameLow: VideoFrame | undefined;
 
     try {
-      const isKey = frameIndex % Math.max(1, Math.floor(frameRate * 2)) === 1;
+      // Both encodings need an aligned IDR frame: mediasoup can then switch
+      // spatial layers without waiting for the fixed two-second GOP interval.
+      const isKey = forceNextKeyFrame ||
+        frameIndex % Math.max(1, Math.floor(frameRate * 2)) === 1;
+      forceNextKeyFrame = false;
 
-      // --- High Layer 렌더링 ---
-      ctxHigh.drawImage(frame, 0, 0, widthHigh, heightHigh);
-      ctxHigh.fillStyle = 'rgba(10, 92, 120, 0.85)';
-      ctxHigh.fillRect(14, 14, 280, 72);
-      ctxHigh.fillStyle = '#ffffff';
-      ctxHigh.font = 'bold 20px sans-serif';
-      ctxHigh.fillText('Producer [High 720p]', 24, 46);
-      ctxHigh.font = '14px sans-serif';
-      ctxHigh.fillText(`frame ${frameIndex} | 1.5 Mbps`, 24, 70);
-
+      // The high layer preserves the captured frame and avoids an unnecessary
+      // 720p canvas draw/copy on every frame.
       frameHigh = new VideoFrame(
-        canvasHigh,
+        frame,
         frame.duration === null
           ? { timestamp: frame.timestamp }
           : { timestamp: frame.timestamp, duration: frame.duration }
       );
       encoderHigh.encode(frameHigh, { keyFrame: isKey });
 
-      // --- Low Layer 렌더링 ---
+      // Low layer needs a resize, so it alone uses OffscreenCanvas.
       ctxLow.drawImage(frame, 0, 0, widthLow, heightLow);
-      ctxLow.fillStyle = 'rgba(30, 41, 59, 0.85)';
-      ctxLow.fillRect(10, 10, 210, 56);
-      ctxLow.fillStyle = '#38bdf8';
-      ctxLow.font = 'bold 15px sans-serif';
-      ctxLow.fillText('Producer [Low 360p]', 18, 34);
-      ctxLow.font = '12px sans-serif';
-      ctxLow.fillStyle = '#e2e8f0';
-      ctxLow.fillText(`frame ${frameIndex} | 350 kbps`, 18, 52);
-
       frameLow = new VideoFrame(
         canvasLow,
         frame.duration === null
@@ -749,6 +756,7 @@ async function startEncoder(stream: MediaStream): Promise<void> {
       frameLow?.close();
     }
   }
+
 }
 
 /**

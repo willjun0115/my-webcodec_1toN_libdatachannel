@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
-import { WebSocketServer, type RawData, type WebSocket } from 'ws';
+import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import * as mediasoup from '../../mediasoup/node/lib/index.js';
 import {
   WebCodecsSimulcastPipeline,
@@ -462,6 +462,7 @@ async function handleRequest(
     }
 
     await peer.consumer.resume();
+    requestProducerKeyFrame('consumer resumed');
     reply(socket, id, {});
     return;
   }
@@ -475,7 +476,11 @@ async function handleRequest(
     }
 
     const { spatialLayer } = data as { spatialLayer: number };
+    if (spatialLayer !== 0 && spatialLayer !== 1) {
+      throw new Error('spatialLayer must be 0 (360p) or 1 (720p)');
+    }
     await peer.consumer.setPreferredLayers({ spatialLayer });
+    requestProducerKeyFrame(`consumer requested spatial layer ${spatialLayer}`);
     reply(socket, id, { spatialLayer });
     return;
   }
@@ -568,6 +573,17 @@ function cleanupPeer(peer: PeerState): void {
 
   logPeerCount('leave', peer);
   broadcastRoomState();
+}
+
+function requestProducerKeyFrame(reason: string): void {
+  const producerPeer = producerPeerId ? peers.get(producerPeerId) : undefined;
+  if (!producerPeer || producerPeer.socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  // DirectTransport injection cannot make the browser encoder emit an IDR via
+  // RTCP PLI itself, so relay the request over the existing signaling socket.
+  producerPeer.socket.send(JSON.stringify({ event: 'requestKeyFrame', data: { reason } }));
 }
 
 function assertConsumerPeer(peer: PeerState): void {
