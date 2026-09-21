@@ -118,7 +118,6 @@ type PeerState = {
   socket: WebSocket;
   transport?: MediasoupTypes.WebRtcTransport;
   consumer?: MediasoupTypes.Consumer;
-  statsTimer?: NodeJS.Timeout;
 };
 
 // Express 앱 생성
@@ -165,6 +164,7 @@ let producerPeerId: string | undefined;
 let injectedChunks = 0;
 let injectedPackets = 0;
 let peerSeq = 0;
+let lastPipelineStatsBroadcastAt = 0;
 
 // 정적 파일(Vite 빌드 아티팩트) 제공
 app.use(express.static(path.join(rootDir, 'dist')));
@@ -321,6 +321,7 @@ async function registerPeer(socket: WebSocket): Promise<PeerState> {
     producerPeerId = id;
     injectedChunks = 0;
     injectedPackets = 0;
+    lastPipelineStatsBroadcastAt = 0;
     // WebCodecs H.264 멀티 SSRC 시뮬캐스트 DirectTransport Producer 생성
     producer = await simulcastPipeline.setup(router, '42e01f');
     console.log(`[room] ${id} joined as producer, simulcast producer ${producer?.id}`);
@@ -435,12 +436,7 @@ async function handleRequest(
 
     await peer.consumer.enableTraceEvent(['rtp', 'keyframe', 'pli', 'fir']);
 
-    peer.consumer.on('transportclose', () => {
-      stopStatsPump(peer);
-    });
-
     peer.consumer.on('layerschange', (layers: MediasoupTypes.ConsumerLayers | undefined) => {
-      console.log(`[room] Consumer ${peer.id} layerschange:`, layers);
       socket.send(JSON.stringify({
         event: 'consumerLayersChanged',
         data: layers
@@ -466,7 +462,6 @@ async function handleRequest(
     }
 
     await peer.consumer.resume();
-    startStatsPump(socket, peer);
     reply(socket, id, {});
     return;
   }
@@ -481,7 +476,6 @@ async function handleRequest(
 
     const { spatialLayer } = data as { spatialLayer: number };
     await peer.consumer.setPreferredLayers({ spatialLayer });
-    console.log(`[room] Consumer ${peer.id} set preferred spatial layer: ${spatialLayer}`);
     reply(socket, id, { spatialLayer });
     return;
   }
@@ -543,20 +537,10 @@ function handleEncodedChunk(peer: PeerState, raw: RawData): void {
   injectedChunks++;
   injectedPackets++;
 
-  // 10청크마다 또는 키프레임 발생 시 클라이언트에 주입 통계 알림
-  if (injectedChunks % 10 === 0 || header.type === 'key') {
-    peer.socket.send(
-      JSON.stringify({
-        event: 'pipelineStats',
-        data: {
-          injectedChunks,
-          injectedPackets,
-          lastChunkType: header.type,
-          consumerCount: countConsumers()
-        }
-      })
-    );
-    broadcastRoomState();
+  // Telemetry is intentionally rate-limited: media chunks arrive many times per second.
+  if (Date.now() - lastPipelineStatsBroadcastAt >= 1000) {
+    lastPipelineStatsBroadcastAt = Date.now();
+    broadcastPipelineStats();
   }
 }
 
@@ -564,7 +548,6 @@ function handleEncodedChunk(peer: PeerState, raw: RawData): void {
  * 피어 접속 해제 처리 및 자원 정리 함수
  */
 function cleanupPeer(peer: PeerState): void {
-  stopStatsPump(peer);
   peer.consumer?.close();
   peer.transport?.close();
   peers.delete(peer.id);
@@ -577,7 +560,6 @@ function cleanupPeer(peer: PeerState): void {
     producerPeerId = undefined;
 
     for (const other of peers.values()) {
-      stopStatsPump(other);
       other.consumer?.close();
       delete other.consumer;
       other.socket.send(JSON.stringify({ event: 'producerClosed' }));
@@ -595,39 +577,17 @@ function assertConsumerPeer(peer: PeerState): void {
 }
 
 /**
- * Consumer별 2초 주기 실시간 통계 펌프 시작 함수
+ * Compresses high-frequency media activity into one small status event per second.
  */
-function startStatsPump(socket: WebSocket, peer: PeerState): void {
-  stopStatsPump(peer);
+function broadcastPipelineStats(): void {
+  const data = {
+    injectedChunks,
+    injectedPackets,
+    consumerCount: countConsumers()
+  };
 
-  peer.statsTimer = setInterval(async () => {
-    try {
-      const [producerStats, consumerStats, transportStats] = await Promise.all([
-        producer?.getStats(),
-        peer.consumer?.getStats(),
-        peer.transport?.getStats()
-      ]);
-
-      socket.send(
-        JSON.stringify({
-          event: 'serverStats',
-          data: {
-            producer: producerStats,
-            consumer: consumerStats,
-            transport: transportStats
-          }
-        })
-      );
-    } catch (error) {
-      console.error('[stats] failed', error);
-    }
-  }, 2000);
-}
-
-function stopStatsPump(peer: PeerState): void {
-  if (peer.statsTimer) {
-    clearInterval(peer.statsTimer);
-    delete peer.statsTimer;
+  for (const peer of peers.values()) {
+    peer.socket.send(JSON.stringify({ event: 'pipelineStats', data }));
   }
 }
 

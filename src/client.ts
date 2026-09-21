@@ -84,7 +84,6 @@ interface ConsumerStatSample {
 interface ServerEventLogEntry {
   timeIso: string;
   event: string;
-  data: unknown;
 }
 
 interface StatsDumpFile {
@@ -113,6 +112,8 @@ const startTimeIso = new Date().toISOString();
 const producerStatsHistory: ProducerStatSample[] = [];
 const consumerStatsHistory: ConsumerStatSample[] = [];
 const serverEventsLog: ServerEventLogEntry[] = [];
+const MAX_LOG_LINES = 50;
+const MAX_SERVER_EVENT_ENTRIES = 100;
 
 let activeEncoderHigh: VideoEncoder | null = null;
 let activeEncoderLow: VideoEncoder | null = null;
@@ -301,15 +302,17 @@ async function connectSocket(): Promise<WebSocket> {
 }
 
 /**
- * 서버 푸시 이벤트(역할 할당, 룸 상태 변경, 서버 통계 등) 처리
+ * 서버 푸시 이벤트(역할 할당, 룸 상태 변경, 압축된 파이프라인 통계 등) 처리
  */
 function handleEvent(message: ResponseMessage): void {
-  if (message.event) {
+  if (message.event && isLifecycleEvent(message.event)) {
     serverEventsLog.push({
       timeIso: new Date().toISOString(),
-      event: message.event,
-      data: message.data
+      event: message.event
     });
+    if (serverEventsLog.length > MAX_SERVER_EVENT_ENTRIES) {
+      serverEventsLog.shift();
+    }
   }
 
   if (message.event === 'roleAssigned') {
@@ -372,21 +375,12 @@ function handleEvent(message: ResponseMessage): void {
 
     packetCount.textContent = String(stats.injectedPackets);
     consumerCount.textContent = String(stats.consumerCount);
-    writeLog(
-      `server injected ${stats.injectedChunks} chunks, last=${stats.lastChunkType}`
-    );
+    if (role === 'consumer') {
+      chunkCount.textContent = String(stats.injectedChunks);
+    }
     return;
   }
 
-  if (message.event === 'transportState') {
-    writeLog(`transport ${JSON.stringify(message.data)}`);
-    return;
-  }
-
-  if (message.event === 'serverStats') {
-    writeLog(summarizeServerStats(message.data));
-    return;
-  }
 
   if (message.event === 'producerClosed') {
     consumerState.textContent = 'producer closed';
@@ -486,7 +480,7 @@ async function setupConsumer(): Promise<void> {
       spatialLayer: currentPreferredSpatialLayer
     });
   } catch (err) {
-    console.warn('Failed to set initial preferred layer:', err);
+    writeLog(`Failed to set initial preferred layer: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   void remoteVideo.play().catch(error => {
@@ -984,32 +978,16 @@ function arrayBufferToBase64(buffer: AllowSharedBufferSource): string {
   return btoa(binary);
 }
 
-function writeLog(line: string): void {
-  const time = new Date().toLocaleTimeString();
-
-  logBox.textContent = `[${time}] ${line}\n${logBox.textContent}`;
+function isLifecycleEvent(event: string): boolean {
+  return event === 'roleAssigned' || event === 'consumerLayersChanged' || event === 'producerClosed';
 }
 
-function summarizeServerStats(data: unknown): string {
-  const stats = data as {
-    producer?: Array<Record<string, unknown>>;
-    consumer?: Array<Record<string, unknown>>;
-    transport?: Array<Record<string, unknown>>;
-  };
-  const producer = stats.producer?.[0];
-  const consumer = stats.consumer?.[0];
-  const transport = stats.transport?.[0];
-  const producerPackets =
-    producer?.packetCount ?? producer?.packetsReceived ?? producer?.packetsSent;
-  const consumerPackets =
-    consumer?.packetCount ?? consumer?.packetsSent ?? consumer?.packetsReceived;
-  const transportSent = transport?.rtpBytesSent ?? transport?.bytesSent;
+function writeLog(line: string): void {
+  const time = new Date().toLocaleTimeString();
+  const lines = logBox.textContent ? logBox.textContent.split('\n') : [];
 
-  return `server stats: producerPackets=${String(
-    producerPackets ?? 'n/a'
-  )}, consumerPackets=${String(
-    consumerPackets ?? 'n/a'
-  )}, transportSent=${String(transportSent ?? 'n/a')}`;
+  lines.unshift(`[${time}] ${line}`);
+  logBox.textContent = lines.slice(0, MAX_LOG_LINES).join('\n');
 }
 
 declare global {
